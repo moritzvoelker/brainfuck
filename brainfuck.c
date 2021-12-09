@@ -2,12 +2,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-char *getSrc(char *filePath);
-int compile(char *src);
-size_t getMatchingOpening(char *src, size_t offset);
-size_t getMatchingClosing(char *src, size_t offset);
-
-char *programHeader = "\
+#define PROGRAM_HEADER "\
 extern putchar, getchar\n\
 section .bss\n\
 \tdata resb 30000\n\
@@ -16,7 +11,57 @@ section .text\n\
 \tglobal main\n\
 main:\n\
 \tmov rbx, data\n\
-";
+"
+#define PTR_RIGHT "\tinc rbx\n"
+#define PTR_LEFT "\tdec rbx\n"
+#define ADD "\tinc byte [rbx]\n"
+#define SUB "\tdec byte [rbx]\n"
+#define OUTPUT "\
+\txor rdi, rdi\n\
+\tmov dil, [rbx]\n\
+\tcall putchar\n\
+"
+#define INPUT "\
+\tcall getchar\n\
+\tmov [rbx], al\n\
+"
+#define OPENING "\
+\tcmp [rbx], byte 0\n\
+\tjz .c_%zu\n\
+.o_%zu:\n\
+"
+#define CLOSING "\
+\tcmp [rbx], byte 0\n\
+\tjnz .o_%zu\n\
+.c_%zu:\n\
+"
+#ifdef _WIN32
+
+#define PROGRAM_FOOTER "\
+\txor rax, rax\n\
+\tret\n\
+"
+#define NASM "nasm -f win64 -o tmp.o tmp.asm"
+#define LINK "ld -e main -lc tmp.o -o %s"
+
+#else
+
+#define PROGRAM_FOOTER "\
+\tmov rdi, 0\n\
+\tmov rax, 60\n\
+\tsyscall\n\
+"
+#define NASM "nasm -f elf64 -o tmp.o tmp.asm"
+#define LINK "ld -e main -dynamic-linker /lib64/ld-linux-x86-64.so.2 -lc tmp.o -o %s"
+
+#endif
+
+char *getSrc(char *filePath);
+int compile(char *src);
+size_t getMatchingOpening(char *src, size_t offset);
+size_t getMatchingClosing(char *src, size_t offset);
+
+size_t wrongDepth = 0;
 
 int main (int argc, char **argv)
 {
@@ -40,7 +85,7 @@ int main (int argc, char **argv)
 	int compileStatus = compile(src);
 	if (compileStatus == 1)
 	{
-		printf("Number of '[' doesn't match number of ']'\n");
+		printf("Number of '[' doesn't match number of ']', %zd\n", wrongDepth);
 		return 4;
 	}
 	else if (compileStatus == 2)
@@ -51,7 +96,7 @@ int main (int argc, char **argv)
 
 	free(src);
 
-	FILE *child = popen("nasm -f elf64 -o tmp.o tmp.asm", "r");
+	FILE *child = popen(NASM, "r");
 	char buf[512];
 	while (fgets(buf, 512, child))
 	{
@@ -59,7 +104,7 @@ int main (int argc, char **argv)
 	}
 	pclose(child);
 
-	snprintf(buf, 512, "ld -e main -dynamic-linker /lib64/ld-linux-x86-64.so.2 -lc tmp.o -o %s", argv[2]);
+	snprintf(buf, 512, LINK, argv[2]);
 	child = popen(buf, "r");
 	while (fgets(buf, 512, child))
 	{
@@ -92,7 +137,7 @@ int compile(char *src)
 	FILE *file;
 	file = fopen("tmp.asm", "w");
 
-	fprintf(file, "%s", programHeader);
+	fprintf(file, "%s", PROGRAM_HEADER);
 
 	if (file)
 	{
@@ -103,29 +148,22 @@ int compile(char *src)
 			switch (src[offset])
 			{
 				case '>':
-					fprintf(file, "\tinc rbx\n");
+					fprintf(file, PTR_RIGHT);
 					break;
 				case '<':
-					fprintf(file, "\tdec rbx\n");
+					fprintf(file, PTR_LEFT);
 					break;
 				case '+':
-					fprintf(file, "\tinc byte [rbx]\n");
+					fprintf(file, ADD);
 					break;
 				case '-':
-					fprintf(file, "\tdec byte [rbx]\n");
+					fprintf(file, SUB);
 					break;
 				case '.':
-					fprintf(file, "\
-\txor rdi, rdi\n\
-\tmov dil, [rbx]\n\
-\tcall putchar\n\
-");
+					fprintf(file, OUTPUT);
 					break;
 				case ',':
-					fprintf(file, "\
-\tcall getchar\n\
-\tmov [rbx], al\n\
-");
+					fprintf(file, INPUT);
 					break;
 				case '[':
 					match = getMatchingClosing(src, offset);
@@ -134,11 +172,7 @@ int compile(char *src)
 						fclose(file);
 						return 1;
 					}
-					fprintf(file, "\
-\tcmp [rbx], byte 0\n\
-\tjz .c_%zu\n\
-.o_%zu:\n\
-", match, offset);
+					fprintf(file, OPENING, match, offset);
 					break;
 				case ']':
 					match = getMatchingOpening(src, offset);
@@ -147,11 +181,7 @@ int compile(char *src)
 						fclose(file);
 						return 1;
 					}
-					fprintf(file, "\
-\tcmp [rbx], byte 0\n\
-\tjnz .o_%zu\n\
-.c_%zu:\n\
-", match, offset);
+					fprintf(file, CLOSING, match, offset);
 					break;
 				default:
 					break;
@@ -159,11 +189,7 @@ int compile(char *src)
 			offset++;
 		}
 
-		fprintf(file, "\
-\tmov rdi, 0\n\
-\tmov rax, 60\n\
-\tsyscall\n\
-");
+		fprintf(file, PROGRAM_FOOTER);
 		fclose(file);
 		return 0;
 	}
@@ -173,7 +199,7 @@ int compile(char *src)
 size_t getMatchingOpening(char *src, size_t offset)
 {
 	size_t depth = 0;
-	while (offset)
+	while (offset + 1)
 	{
 		switch (src[offset])
 		{
@@ -192,6 +218,7 @@ size_t getMatchingOpening(char *src, size_t offset)
 		}
 		offset--;
 	}
+	wrongDepth = 1;
 	return -1;
 }
 
@@ -218,5 +245,6 @@ size_t getMatchingClosing(char *src, size_t offset)
 		}
 		offset++;
 	}
+	wrongDepth = -1;
 	return -1;
 }
